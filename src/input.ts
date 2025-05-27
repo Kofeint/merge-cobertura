@@ -3,6 +3,7 @@ import { X2jOptions, XMLParser } from 'fast-xml-parser';
 import { CoberturaJson } from './types/cobertura';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as glob from 'glob';
 
 interface PackageJson {
   version: string;
@@ -14,10 +15,12 @@ function printHelp() {
   ) as PackageJson;
 
   console.log(`Version ${packageJson.version}`);
-  console.log('Syntax:    cobertura-merge [options]... [package=input...]');
+  console.log('Syntax:    merge-cobertura [options]... [package=input...]');
+  console.log('           merge-cobertura [options]... input-files...');
   console.log('');
-  console.log('Examples:  cobertura-merge -o output.xml package1=output1.xml package2=output2.xml');
-  console.log('           cobertura-merge -p package1=output1.xml package2=output2.xml');
+  console.log('Examples:  merge-cobertura -o output.xml package1=output1.xml package2=output2.xml');
+  console.log('           merge-cobertura -o output.xml coverage/*.xml');
+  console.log('           merge-cobertura -p package1=output1.xml package2=output2.xml');
   console.log('');
   console.log('Options');
   console.log('-o FILE         Specify output file');
@@ -29,7 +32,7 @@ const KNOWN_ARGS = ['_', 'o', 'p', 'print'];
 
 // initialize XMLParser
 const options: X2jOptions = {
-  ignoreAttributes : false,
+  ignoreAttributes: false,
   attributeNamePrefix: '',
   ignoreDeclaration: true,
   textNodeName: '$t',
@@ -40,7 +43,6 @@ const options: X2jOptions = {
 };
 
 const parser = new XMLParser(options);
-
 
 export function validateArgs(args: ParsedArgs): void {
   // Check for unknown arguments
@@ -55,17 +57,6 @@ export function validateArgs(args: ParsedArgs): void {
     // Input error
     printHelp();
   }
-  const inputArgs = args._.slice(2);
-  if (
-    inputArgs.some((input) => {
-      // Check to see if the input is in format package=input
-      const matches = input.match(/=/g);
-      return !matches || matches.length !== 1 || input.split('=').some((part) => !part.trim());
-    })
-  ) {
-    // Input error
-    printHelp();
-  }
 }
 
 export interface InputData {
@@ -74,8 +65,27 @@ export interface InputData {
   data: CoberturaJson;
 }
 
+function expandGlobs(filePatterns: string[]): string[] {
+  const result: string[] = [];
+  for (const pattern of filePatterns) {
+    const files = glob.sync(pattern);
+    if (files.length === 0) {
+      console.warn(`Warning: No files found matching pattern '${pattern}'`);
+    }
+    result.push(...files);
+  }
+  return result;
+}
+
 export function getInputDataFromArgs(args: ParsedArgs): InputData[] {
-  return args._.slice(2).map((inputArg) => {
+  const inputArgs = args._.slice(2);
+  
+  // separate args on package=file on files or globs
+  const explicitMappings = inputArgs.filter(arg => arg.includes('='));
+  const filePatterns = inputArgs.filter(arg => !arg.includes('='));
+  
+  // process  package=file
+  const explicitInputs = explicitMappings.map(inputArg => {
     const parts = inputArg.split('=');
     const packageName = parts[0];
     const fileName = parts[1];
@@ -93,4 +103,26 @@ export function getInputDataFromArgs(args: ParsedArgs): InputData[] {
       data,
     };
   });
+  
+  // process glob patterns
+  const expandedFiles = expandGlobs(filePatterns);
+  const implicitInputs = expandedFiles.map(fileName => {
+    let data: CoberturaJson;
+    try {
+      data = parser.parse(fs.readFileSync(fileName, 'utf-8')) as CoberturaJson;
+    } catch (e) {
+      console.log(e);
+      console.log(`Unable to read file ${fileName}`);
+      process.exit(1);
+    }
+
+    const dirName = path.dirname(fileName);
+    return {
+      packageName: path.basename(dirName), // using dir as package name
+      fileName,
+      data,
+    };
+  });
+  
+  return [...explicitInputs, ...implicitInputs];
 }
